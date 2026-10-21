@@ -12,8 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by Shaling AI in 2026: handling of out-of-date ParticipantInfo
+// (see SHALING_PATCHES.md). Not part of upstream livekit/client-sdk-flutter.
+
+import 'dart:async' as async;
+
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:meta/meta.dart';
+import 'package:synchronized/synchronized.dart' as sync;
 
 import '../core/room.dart';
 import '../events.dart';
@@ -53,8 +59,82 @@ class ParticipantCreationResult {
   });
 }
 
+/// Shaling AI fork patch (not upstream): an out-of-date
+/// [lk_models.ParticipantInfo] received by [RemoteParticipant.updateFromInfo],
+/// captured before its track list is (or is not) reconciled.
+@immutable
+class StaleParticipantInfo {
+  const StaleParticipantInfo({
+    required this.participantSid,
+    required this.participantKind,
+    required this.appliedVersion,
+    required this.staleVersion,
+    required this.staleTrackSids,
+    required this.omittedTrackSids,
+    required this.ignored,
+  });
+
+  /// Participant sid the out-of-date info was compared against.
+  final String participantSid;
+
+  /// Participant kind at that comparison.
+  final ParticipantKind participantKind;
+
+  /// Version already applied for that sid when the info was compared.
+  final int appliedVersion;
+
+  /// Version of the out-of-date info.
+  final int staleVersion;
+
+  /// Track sids the out-of-date info lists.
+  final List<String> staleTrackSids;
+
+  /// Published track sids the out-of-date info omits. The stock SDK removes
+  /// these publications.
+  final List<String> omittedTrackSids;
+
+  /// Whether the info was ignored, see
+  /// [RemoteParticipant.shouldIgnoreStaleParticipantInfo].
+  final bool ignored;
+}
+
+/// Shaling AI fork patch (not upstream): see
+/// [RemoteParticipant.staleParticipantInfoObserver].
+typedef StaleParticipantInfoObserver = void Function(
+  Room room,
+  RemoteParticipant participant,
+  StaleParticipantInfo info,
+);
+
 /// Represents other participant in the [Room].
 class RemoteParticipant extends Participant<RemoteTrackPublication> {
+  /// Shaling AI fork patch (not upstream).
+  ///
+  /// `Room` applies ParticipantUpdates received before the local participant
+  /// exists only after `RoomConnectedEvent`, all at once, and the stock
+  /// [updateFromInfo] removes live publications in two ways:
+  /// - an info older than the one already applied still reconciles its track
+  ///   list, because the early return after [Participant.updateFromInfo] is
+  ///   commented out;
+  /// - concurrent updates interleave at `await`s, so an older update can
+  ///   compute its removals after a newer one added tracks.
+  ///
+  /// When this returns true, updates for a participant run one at a time and
+  /// an out-of-date info is ignored, as in client-sdk-js. Null (the default),
+  /// false or a throw keep the stock behaviour. It is called once per update,
+  /// so the host app can return its current feature-flag value.
+  static bool Function()? shouldIgnoreStaleParticipantInfo;
+
+  /// Shaling AI fork patch (not upstream): called for every out-of-date info
+  /// [updateFromInfo] receives. Errors are logged and swallowed.
+  static StaleParticipantInfoObserver? staleParticipantInfoObserver;
+
+  /// Shaling AI fork patch (not upstream): how long an update waits for the
+  /// previous update of the same participant before running without waiting.
+  static const _updateLockTimeout = Duration(seconds: 5);
+
+  final _updateLock = sync.Lock();
+
   RemoteParticipant._({
     required Room room,
     required String sid,
@@ -257,14 +337,74 @@ class RemoteParticipant extends Participant<RemoteTrackPublication> {
   @override
   @internal
   Future<bool> updateFromInfo(lk_models.ParticipantInfo info) async {
+    // Shaling AI fork patch: see [shouldIgnoreStaleParticipantInfo].
+    var patched = false;
+    try {
+      patched = shouldIgnoreStaleParticipantInfo?.call() ?? false;
+    } catch (error) {
+      logger.warning('shouldIgnoreStaleParticipantInfo failed: $error');
+    }
+    if (!patched) return _updateFromInfo(info, patched: false);
+    var started = false;
+    try {
+      return await _updateLock.synchronized(() {
+        started = true;
+        return _updateFromInfo(info, patched: true);
+      }, timeout: _updateLockTimeout);
+    } on async.TimeoutException {
+      if (started) rethrow;
+      // Leaves the queue: this update keeps the version check but is no
+      // longer ordered against the updates around it.
+      logger.warning('updateFromInfo: the previous update is still running, continuing without waiting');
+      return _updateFromInfo(info, patched: true);
+    }
+  }
+
+  Future<bool> _updateFromInfo(lk_models.ParticipantInfo info, {required bool patched}) async {
     logger.fine('RemoteParticipant.updateFromInfo(info: $info)');
+    // Shaling AI fork patch: the base class compares synchronously when
+    // called, so this is the state the comparison sees.
+    final compared = staleParticipantInfoObserver == null
+        ? null
+        : (sid: sid, kind: kind, version: appliedInfoVersion, published: trackPublications.keys.toList());
     if (!await super.updateFromInfo(info)) {
-      //return false;
+      // Shaling AI fork patch: upstream leaves `//return false;` here.
+      if (compared != null) _observeStaleInfo(info, compared, ignored: patched);
+      if (patched) return false;
     }
 
     await _updateTracks(info.tracks);
 
     return true;
+  }
+
+  void _observeStaleInfo(
+    lk_models.ParticipantInfo info,
+    ({String sid, ParticipantKind kind, int? version, List<String> published}) compared, {
+    required bool ignored,
+  }) {
+    final observer = staleParticipantInfoObserver;
+    if (observer == null) return;
+    try {
+      final staleTrackSids = List<String>.unmodifiable(info.tracks.map((track) => track.sid));
+      observer(
+        room,
+        this,
+        StaleParticipantInfo(
+          participantSid: compared.sid,
+          participantKind: compared.kind,
+          appliedVersion: compared.version!,
+          staleVersion: info.version,
+          staleTrackSids: staleTrackSids,
+          omittedTrackSids: List<String>.unmodifiable(
+            compared.published.where((sid) => !staleTrackSids.contains(sid)),
+          ),
+          ignored: ignored,
+        ),
+      );
+    } catch (error) {
+      logger.warning('staleParticipantInfoObserver failed: $error');
+    }
   }
 
   Future<void> _updateTracks(List<lk_models.TrackInfo> tracks) async {

@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by Shaling AI in 2026: handling of out-of-date ParticipantInfo
+// (see SHALING_PATCHES.md). Not part of upstream livekit/client-sdk-flutter.
+
 import 'dart:async';
 import 'dart:typed_data' show Uint8List;
 
@@ -800,8 +803,10 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         final wasUpdated = await result.participant.updateFromInfo(info);
         if (wasUpdated) {
           _remoteParticipants.set(result.participant);
-          await _flushPendingTracks(participant: result.participant);
         }
+        // Shaling AI fork patch: an ignored out-of-date info still flushes
+        // pending tracks, as every update did before the patch.
+        await _flushPendingTracks(participant: result.participant);
       }
     }
 

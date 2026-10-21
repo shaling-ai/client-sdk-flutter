@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by Shaling AI in 2026: handling of out-of-date ParticipantInfo
+// (see SHALING_PATCHES.md). Not part of upstream livekit/client-sdk-flutter.
+
 import 'package:collection/collection.dart';
 import 'package:meta/meta.dart';
 
@@ -140,6 +143,16 @@ abstract class Participant<T extends TrackPublication> extends DisposableChangeN
 
   @internal
   bool get hasInfo => _participantInfo != null;
+
+  /// Shaling AI fork patch (not upstream): version of the applied
+  /// [lk_models.ParticipantInfo], null before the first one.
+  @internal
+  int? get appliedInfoVersion => _participantInfo?.version;
+
+  /// Shaling AI fork patch (not upstream): track sids listed by the applied
+  /// [lk_models.ParticipantInfo].
+  @internal
+  List<String> get appliedInfoTrackSids => [for (final track in _participantInfo?.tracks ?? const []) track.sid];
 
   @internal
   Participant({
