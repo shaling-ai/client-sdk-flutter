@@ -353,8 +353,8 @@ class RemoteParticipant extends Participant<RemoteTrackPublication> {
       }, timeout: _updateLockTimeout);
     } on async.TimeoutException {
       if (started) rethrow;
-      // Leaves the queue: this update keeps the version check but is no
-      // longer ordered against the updates around it.
+      // Leaves the queue. Reconciliation checks the accepted snapshot again
+      // after awaits so an older continuation cannot remove newer tracks.
       logger.warning('updateFromInfo: the previous update is still running, continuing without waiting');
       return _updateFromInfo(info, patched: true);
     }
@@ -373,9 +373,10 @@ class RemoteParticipant extends Participant<RemoteTrackPublication> {
       if (patched) return false;
     }
 
-    await _updateTracks(info.tracks);
-
-    return true;
+    // A timed-out update can replace the snapshot while the base-class future
+    // is being awaited, even when both updates passed the version check.
+    if (patched && !isCurrentInfo(info)) return false;
+    return _updateTracks(info.tracks, currentInfo: patched ? info : null);
   }
 
   void _observeStaleInfo(
@@ -407,12 +408,21 @@ class RemoteParticipant extends Participant<RemoteTrackPublication> {
     }
   }
 
-  Future<void> _updateTracks(List<lk_models.TrackInfo> tracks) async {
+  Future<bool> _updateTracks(List<lk_models.TrackInfo> tracks, {lk_models.ParticipantInfo? currentInfo}) async {
     // Add new tracks
     final newPubs = await _addTracks(tracks);
 
     // Emit events for new publications
     for (final pub in newPubs) {
+      // A newer update may have removed/replaced this publication across the
+      // await. Keep announcing retained publications: the newer update saw
+      // them as existing and therefore will not emit their published event.
+      if (currentInfo != null &&
+          (isDisposed ||
+              !identical(getTrackPublicationBySid(pub.sid), pub) ||
+              !appliedInfoTrackSids.contains(pub.sid))) {
+        continue;
+      }
       final event = TrackPublishedEvent(
         participant: this,
         publication: pub,
@@ -426,8 +436,12 @@ class RemoteParticipant extends Participant<RemoteTrackPublication> {
     final validSids = tracks.map((e) => e.sid);
     final removeSids = trackPublications.keys.where((e) => !validSids.contains(e)).toSet();
     for (final sid in removeSids) {
+      // Stopping the previous media track may outlive the lock timeout. The
+      // precomputed removal list is no longer authoritative after that await.
+      if (currentInfo != null && !isCurrentInfo(currentInfo)) return false;
       await removePublishedTrack(sid);
     }
+    return currentInfo == null || isCurrentInfo(currentInfo);
   }
 
   Future<void> removePublishedTrack(String trackSid, {bool notify = true}) async {

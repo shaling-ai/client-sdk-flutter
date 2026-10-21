@@ -131,6 +131,28 @@ that upstream still behaves this way.
 Full SDK suite on the P1 code (Flutter 3.38.4): with no switch set, 392 passed, 0 failed, 1 skipped. With the switch
 forced on in every test, 391 passed and 1 failed: "the switch defaults to the stock behaviour", as expected.
 
+**Reconciliation after the lock timeout (pending release).**
+
+The 5 s escape keeps a stuck native track stop from blocking all future updates, but serialization alone
+does not protect the old update when that stop eventually completes. Its previously computed removal list
+can delete a track retained by a newer snapshot that ran after the timeout.
+
+With the switch ON, reconciliation now checks that its exact accepted snapshot is still current after the
+base update and before each removal. Equal-version replacements and a new participant SID also supersede
+that snapshot; rejected stale updates do not. New-publication events are emitted only for publications still
+present and listed by the current snapshot. A retained publication is still announced even if the update
+that first added it was superseded, because the newer update treats it as existing.
+
+This does not cancel an already running native stop. It prevents its continuation from removing additional
+publications under an obsolete snapshot. The OFF path and the 5 s escape remain available. Regression tests
+hold a real SDK media-track cleanup at a controlled future, let a replacement snapshot pass the timeout,
+then release the old cleanup and verify the retained publication survives. A rejected-update control verifies
+that valid cleanup can still finish.
+
+Validation of this follow-up: 396 tests passed and 1 was skipped; analysis, formatting, import order and
+version consistency checks passed. The two same-SID retention regressions fail without the fix. This update
+is not yet included in a published patch tag; apps adopt it after the merge and tagging steps below.
+
 ## Making a change
 
 Fixing a patch and adding a new one follow the same steps.

@@ -154,6 +154,12 @@ abstract class Participant<T extends TrackPublication> extends DisposableChangeN
   @internal
   List<String> get appliedInfoTrackSids => [for (final track in _participantInfo?.tracks ?? const []) track.sid];
 
+  /// Whether [info] is still the accepted snapshot after asynchronous work.
+  /// Identity also distinguishes accepted equal-version updates and a rejoin
+  /// under a new participant SID. A rejected update does not replace it.
+  @protected
+  bool isCurrentInfo(lk_models.ParticipantInfo info) => !isDisposed && identical(_participantInfo, info);
+
   @internal
   Participant({
     required this.room,
