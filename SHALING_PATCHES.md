@@ -9,7 +9,7 @@ Read this before you change the SDK, upgrade it, or need to know what an app bui
 
 [Rules](#rules) · [Branches and tags](#branches-and-tags) · [Pinned commits](#pinned-commits) ·
 [Patches](#patches) · [Making a change](#making-a-change) · [Upgrading upstream](#upgrading-to-a-newer-upstream-release) ·
-[Reporting upstream](#reporting-upstream) · [Consumers](#consumers)
+[Reporting upstream](#reporting-upstream) · [Consumers](#consumers) · [Repository settings](#repository-settings)
 
 ## Rules
 
@@ -26,11 +26,12 @@ Read this before you change the SDK, upgrade it, or need to know what an app bui
 4. **`shaling/*` branches and tags are append-only.** Never force-push them, rebase them in place or delete them.
    Apps pin commits by SHA, and pub fetches a git dependency by cloning this repository's branches and tags. A pinned
    commit that no branch or tag contains may no longer be fetchable, and every app version that pins it would stop
-   building.
+   building. Repository rulesets enforce this (see [Repository settings](#repository-settings)).
 5. **Leave `main` and upstream's tags alone.** `main` is upstream's `main` as it was when we forked; nobody maintains
-   it. The workflows inherited from upstream (`.github/workflows/`) run on pushes to `main` and on `v*` tags (pub.dev
-   publishing, web and docs deploys), and do nothing for `shaling/*` refs. So:
-   - do not use GitHub's "Sync fork" button on a `shaling/*` branch, because it merges upstream `main` into it;
+   it. GitHub Actions is off in this repository, so the workflows inherited from upstream (`.github/workflows/`:
+   pub.dev publishing, web and docs deploys) never run here. Still:
+   - do not use GitHub's "Sync fork" button on a `shaling/*` branch, because it merges upstream `main` into it (the
+     rulesets do not stop this: a merge is a normal update);
    - do not push upstream tags to this repository;
    - push named refs only (`git push origin shaling/v2.9.0`), never `--all`, `--tags` or `--mirror`.
 6. **Behaviour changes are switchable and off by default.** A patch that changes what the SDK does adds a static
@@ -231,6 +232,20 @@ After you change `ref`, run `flutter pub get` with the app's release Flutter ver
 only for this package, and that its `resolved-ref` equals `ref`. To try an unpublished change in an app, point the
 override at your clone (`path: ../client-sdk-flutter`), and never commit that. Each app documents in its own
 repository which commit it pins, how it turns the switches on, and how it rolls back.
+
+## Repository settings
+
+Only a repository admin changes these, and only with the reason recorded here.
+
+| Setting | Value | Why |
+|---|---|---|
+| Default branch | `main` (upstream's, not maintained) | GitHub offers "Sync fork" on the default branch; on a maintenance line it would merge upstream `main` into it. |
+| GitHub Actions | Off | The inherited workflows publish to pub.dev and deploy LiveKit's docs and web demo. None of them is ours to run. |
+| Ruleset "Protect shaling branches" | `refs/heads/shaling/**`: no deletion, no force-push | Rule 4. Normal pushes, merges and new branches are allowed. |
+| Ruleset "Protect shaling tags" | `refs/tags/shaling/**`: no deletion, no update, no force-push | Rule 4: a tag never moves. New tags are allowed. |
+
+GitHub rejects a push that breaks a ruleset with "push declined due to repository rule violations". That rejection is
+working as intended: add a new commit or a new tag instead. Do not relax a ruleset to get a push through.
 
 ## License
 
