@@ -450,6 +450,70 @@ void main() {
     expect(agentOf(container.room)!.getTrackPublicationBySid(clientTrack.sid), isNull);
     await container.dispose();
   });
+
+  for (final replacement in [
+    (version: 6, sid: agentSid),
+    (version: 7, sid: agentSid),
+    (version: 1, sid: 'PA_agent_rejoined'),
+  ]) {
+    test('a timed-out update protects retained tracks when slow cleanup resumes ($replacement)', () async {
+      RemoteParticipant.shouldIgnoreStaleParticipantInfo = () => true;
+      final container = E2EContainer();
+      final releaseStop = Completer<void>();
+      Future<bool>? removing;
+      addTearDown(() async {
+        if (!releaseStop.isCompleted) releaseStop.complete();
+        await removing;
+        await container.dispose();
+      });
+      await container.connectRoom();
+      container.wsConnector.onData(update(agentInfo(5, [sipTrack, clientTrack])));
+      await settle();
+      final agent = agentOf(container.room)!;
+      final retained = agent.getTrackPublicationBySid(clientTrack.sid);
+      final media = _FakeTrack(id: sipTrack.sid, stopGate: releaseStop);
+      _deliverMedia(container.engine, media);
+      await settle(200);
+      expect(agent.getTrackPublicationBySid(sipTrack.sid)?.track, isNotNull);
+
+      // The old removal list contains both tracks. It pauses at the first
+      // native stop; the replacement snapshot keeps the second track.
+      removing = agent.updateFromInfo(agentInfo(6, []));
+      await media.stopping.future;
+      expect(await agent.updateFromInfo(agentInfo(replacement.version, [clientTrack], sid: replacement.sid)), isTrue);
+      expect(agent.getTrackPublicationBySid(clientTrack.sid), same(retained));
+      releaseStop.complete();
+      await removing;
+      expect(agent.getTrackPublicationBySid(clientTrack.sid), same(retained),
+          reason: 'resuming old cleanup must not delete a track kept by the latest snapshot');
+    });
+  }
+
+  test('a rejected update after the lock timeout does not cancel accepted cleanup', () async {
+    RemoteParticipant.shouldIgnoreStaleParticipantInfo = () => true;
+    final container = E2EContainer();
+    final releaseStop = Completer<void>();
+    Future<bool>? removing;
+    addTearDown(() async {
+      if (!releaseStop.isCompleted) releaseStop.complete();
+      await removing;
+      await container.dispose();
+    });
+    await container.connectRoom();
+    container.wsConnector.onData(update(agentInfo(5, [sipTrack, clientTrack])));
+    await settle();
+    final agent = agentOf(container.room)!;
+    final media = _FakeTrack(id: sipTrack.sid, stopGate: releaseStop);
+    _deliverMedia(container.engine, media);
+    await settle(200);
+
+    removing = agent.updateFromInfo(agentInfo(6, []));
+    await media.stopping.future;
+    expect(await agent.updateFromInfo(agentInfo(4, [sipTrack, clientTrack])), isFalse);
+    releaseStop.complete();
+    expect(await removing, isTrue);
+    expect(agent.trackPublications, isEmpty);
+  });
 }
 
 class _FakeMediaStream extends rtc.MediaStream {
@@ -475,6 +539,8 @@ class _FakeMediaStream extends rtc.MediaStream {
 
 class _FakeTrack implements rtc.MediaStreamTrack {
   final bool stopForever;
+  final Completer<void>? stopGate;
+  final stopping = Completer<void>();
   int stopCalls = 0;
   @override
   rtc.StreamTrackCallback? onEnded;
@@ -492,7 +558,7 @@ class _FakeTrack implements rtc.MediaStreamTrack {
   String? get label => 'audio-track';
   @override
   bool? get muted => false;
-  _FakeTrack({required this.id, this.stopForever = false});
+  _FakeTrack({required this.id, this.stopForever = false, this.stopGate});
   @override
   Future<void> applyConstraints([Map<String, dynamic>? constraints]) async {}
   @override
@@ -508,7 +574,8 @@ class _FakeTrack implements rtc.MediaStreamTrack {
   @override
   Future<void> stop() {
     stopCalls++;
-    return stopForever ? Completer<void>().future : Future<void>.value();
+    if (!stopping.isCompleted) stopping.complete();
+    return stopGate?.future ?? (stopForever ? Completer<void>().future : Future<void>.value());
   }
 
   @override

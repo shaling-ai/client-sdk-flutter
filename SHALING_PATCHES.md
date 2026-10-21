@@ -1,11 +1,11 @@
 # Shaling AI patches on livekit_client
 
-This branch is upstream tag `v2.9.0` (`8f86c55`) plus one commit. The package version stays `2.9.0`; the
+This branch builds on upstream tag `v2.9.0` (`8f86c55`). The package version stays `2.9.0`; the
 host app pins the commit SHA in `dependency_overrides`. Tag `shaling/livekit_client-2.9.0-stale-info-1`
-marks the pinned commit so it survives branch rewrites.
+marks the first patch (`8880cb57`). A host must advance its SHA to include subsequent fixes.
 
 Licensed under the Apache License 2.0 like upstream; `LICENSE` and `NOTICE` are unchanged. Each file this
-commit changes carries a "Modified by Shaling AI" line; the added test carries its own header.
+patch changes carries a "Modified by Shaling AI" line; the added test carries its own header.
 
 ## Out-of-date ParticipantInfo removes live tracks
 
@@ -34,6 +34,24 @@ The commit adds, with no change to the default behavior:
 - `Room`: pending tracks are flushed after an ignored info too, as stock flushes after every update.
 - `test/core/stale_participant_info_test.dart`: every scenario with the switch false (the defect reproduces)
   and true, including the production order where all newer updates are held back together.
+
+### Reconciliation after the lock timeout
+
+The 5 s escape keeps a stuck native track stop from blocking all future updates, but serialization alone
+does not protect the old update when that stop eventually completes. Its previously computed removal list
+can delete a track retained by a newer snapshot that ran after the timeout.
+
+With the switch ON, reconciliation now checks that its exact accepted snapshot is still current after the
+base update and before each removal. Equal-version replacements and a new participant SID also supersede
+that snapshot; rejected stale updates do not. New-publication events are emitted only for publications still
+present and listed by the current snapshot. A retained publication is still announced even if the update
+that first added it was superseded, because the newer update treats it as existing.
+
+This does not cancel an already running native stop. It prevents its continuation from removing additional
+publications under an obsolete snapshot. The OFF path and the 5 s escape remain available. Regression tests
+hold a real SDK media-track cleanup at a controlled future, let a replacement snapshot pass the timeout,
+then release the old cleanup and verify the retained publication survives. A rejected-update control verifies
+that valid cleanup can still finish.
 
 Upstream issue: (link after posting).
 
