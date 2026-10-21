@@ -75,6 +75,7 @@ Apps pin only commits listed here. The tip of a line may be ahead of its last ta
 | Tag | Commit | Base | Patches |
 |---|---|---|---|
 | `shaling/v2.9.0-1` | `8880cb57c54dfc66ec9c193d524e2bfb8408f1eb` | `v2.9.0` (`8f86c55`) | P1 |
+| `shaling/v2.9.0-2` | `b3e7057d6f33e8fac4dfea54e55453b82b76ec53` | `v2.9.0` (`8f86c55`) | P1, with its lock-timeout follow-up (#1) |
 
 ## Patches
 
@@ -82,9 +83,9 @@ Apps pin only commits listed here. The tip of a line may be ahead of its last ta
 
 | | |
 |---|---|
-| Since | `shaling/v2.9.0-1` (commit `8880cb57`) |
+| Since | `shaling/v2.9.0-1` (commit `8880cb57`). The lock-timeout follow-up since `shaling/v2.9.0-2` (commit `b3e7057d`, #1). |
 | Files | `lib/src/participant/remote.dart`, `lib/src/participant/participant.dart`, `lib/src/core/room.dart`. No new dependencies (`synchronized` is already one). |
-| Tests | `test/core/stale_participant_info_test.dart` (23 tests) |
+| Tests | `test/core/stale_participant_info_test.dart` (27 tests since `shaling/v2.9.0-2`; 23 before) |
 | Switch | `RemoteParticipant.shouldIgnoreStaleParticipantInfo` (`bool Function()?`, null = stock). Observer: `RemoteParticipant.staleParticipantInfoObserver`. |
 | Upstream | Not reported yet. |
 | Drop when | Upstream both ignores an out-of-date info in `RemoteParticipant.updateFromInfo` and applies a participant's held-back updates in order (see [Upgrading](#upgrading-to-a-newer-upstream-release)). |
@@ -110,6 +111,7 @@ live, without unsubscribing:
   versions, the stale info's track sids, the published sids that info omits, and whether it was ignored. The compared
   state is captured right before the base class compares. Errors thrown by the observer are swallowed.
 - `Participant.appliedInfoVersion` and `Participant.appliedInfoTrackSids` (`@internal`) expose the applied info.
+  `Participant.isCurrentInfo` (`@protected`, since `shaling/v2.9.0-2`) tells whether an info is still the accepted one.
 - `Room` flushes pending tracks after an ignored info too, as stock does after every update.
 
 **Tests.** Every scenario runs with the switch off and on, including the order where all newer updates are held back
@@ -127,11 +129,23 @@ that upstream still behaves this way.
 | the per-participant lock | "updates parked together after the join snapshot keep every published track", "an update stuck past the lock timeout does not block later updates" |
 | the lock timeout | "an update stuck past the lock timeout does not block later updates" |
 | capturing the compared state, or the participant kind, before the `await` | "the snapshot holds the state the out-of-date info was compared against" |
+| `-2`: the snapshot check after the base update (`_updateFromInfo`) | **None yet: no test covers it.** It stops a superseded info from going on to add publications. |
+| `-2`: the snapshot check before each removal (`_updateTracks`) | "a timed-out update protects retained tracks when slow cleanup resumes" (all 3 variants) |
+| `-2`: the publication-event filter (`_updateTracks`) | **None yet: no test covers it.** It announces only publications that are still present and listed by the current snapshot. |
+| `-2`: `isCurrentInfo` made always true, or `_updateTracks` called without the snapshot | "a timed-out update protects retained tracks when slow cleanup resumes" (all 3 variants) |
+| `-2`: `isCurrentInfo` made always false | 8 tests, including "a rejected update after the lock timeout does not cancel accepted cleanup" |
 
-Full SDK suite on the P1 code (Flutter 3.38.4): with no switch set, 392 passed, 0 failed, 1 skipped. With the switch
-forced on in every test, 391 passed and 1 failed: "the switch defaults to the stock behaviour", as expected.
+Rows marked `-2` belong to the lock-timeout follow-up below and were run at `shaling/v2.9.0-2`. For the two rows with no
+test, add one before changing that code.
 
-**Reconciliation after the lock timeout (pending release).**
+Full SDK suite (Flutter 3.38.4), first with no switch set, then with the switch forced on in every test:
+
+- at `shaling/v2.9.0-1`: 392 passed, 0 failed, 1 skipped; forced on, 391 passed and 1 failed;
+- at `shaling/v2.9.0-2`: 396 passed, 0 failed, 1 skipped; forced on, 395 passed and 1 failed.
+
+With the switch forced on, the one failure is "the switch defaults to the stock behaviour", as expected.
+
+**Reconciliation after the lock timeout** (since `shaling/v2.9.0-2`).
 
 The 5 s escape keeps a stuck native track stop from blocking all future updates, but serialization alone
 does not protect the old update when that stop eventually completes. Its previously computed removal list
@@ -150,8 +164,8 @@ then release the old cleanup and verify the retained publication survives. A rej
 that valid cleanup can still finish.
 
 Validation of this follow-up: 396 tests passed and 1 was skipped; analysis, formatting, import order and
-version consistency checks passed. The two same-SID retention regressions fail without the fix. This update
-is not yet included in a published patch tag; apps adopt it after the merge and tagging steps below.
+version consistency checks passed. The two same-SID retention regressions fail without the fix. The mutation
+table above shows which of its checks the tests cover.
 
 ## Making a change
 
