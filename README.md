@@ -1,3 +1,9 @@
+> [!IMPORTANT]
+> **This is Shaling AI's fork, not the official LiveKit SDK.** The `shaling/*` branches carry a few patches on top of
+> upstream releases. What they change, and how to maintain them, is in [SHALING_PATCHES.md](SHALING_PATCHES.md).
+> Apart from this note, the README below is upstream's. The official SDK is
+> [livekit/client-sdk-flutter](https://github.com/livekit/client-sdk-flutter).
+
 <!--BEGIN_BANNER_IMAGE-->
 
 <picture>
