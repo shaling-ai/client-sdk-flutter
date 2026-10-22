@@ -85,7 +85,7 @@ Apps pin only commits listed here. The tip of a line may be ahead of its last ta
 |---|---|
 | Since | `shaling/v2.9.0-1` (commit `8880cb57`). The lock-timeout follow-up since `shaling/v2.9.0-2` (commit `b3e7057d`, #1). |
 | Files | `lib/src/participant/remote.dart`, `lib/src/participant/participant.dart`, `lib/src/core/room.dart`. No new dependencies (`synchronized` is already one). |
-| Tests | `test/core/stale_participant_info_test.dart` (27 tests since `shaling/v2.9.0-2`; 23 before) |
+| Tests | `test/core/stale_participant_info_test.dart`: 29 tests on the line since the two bypass tests; 27 at `shaling/v2.9.0-2`; 23 at `shaling/v2.9.0-1`. |
 | Switch | `RemoteParticipant.shouldIgnoreStaleParticipantInfo` (`bool Function()?`, null = stock). Observer: `RemoteParticipant.staleParticipantInfoObserver`. |
 | Upstream | Not reported yet. |
 | Drop when | Upstream both ignores an out-of-date info in `RemoteParticipant.updateFromInfo` and applies a participant's held-back updates in order (see [Upgrading](#upgrading-to-a-newer-upstream-release)). |
@@ -129,19 +129,24 @@ that upstream still behaves this way.
 | the per-participant lock | "updates parked together after the join snapshot keep every published track", "an update stuck past the lock timeout does not block later updates" |
 | the lock timeout | "an update stuck past the lock timeout does not block later updates" |
 | capturing the compared state, or the participant kind, before the `await` | "the snapshot holds the state the out-of-date info was compared against" |
-| `-2`: the snapshot check after the base update (`_updateFromInfo`) | **None yet: no test covers it.** It stops a superseded info from going on to add publications. |
+| `-2`: the snapshot check after the base update (`_updateFromInfo`) | "an update that bypasses the queue … right after the base update: the superseded update adds no tracks" |
 | `-2`: the snapshot check before each removal (`_updateTracks`) | "a timed-out update protects retained tracks when slow cleanup resumes" (all 3 variants) |
-| `-2`: the publication-event filter (`_updateTracks`) | **None yet: no test covers it.** It announces only publications that are still present and listed by the current snapshot. |
-| `-2`: `isCurrentInfo` made always true, or `_updateTracks` called without the snapshot | "a timed-out update protects retained tracks when slow cleanup resumes" (all 3 variants) |
-| `-2`: `isCurrentInfo` made always false | 8 tests, including "a rejected update after the lock timeout does not cancel accepted cleanup" |
+| `-2`: the publication-event filter (`_updateTracks`) | "an update that bypasses the queue … after the accepted update added a track: the track is not announced" |
+| `-2`: `isCurrentInfo` made always true | the 3 "a timed-out update protects retained tracks …" variants and both bypass tests |
+| `-2`: `_updateTracks` called without the snapshot | the 3 "a timed-out update protects retained tracks …" variants and "… the track is not announced" |
+| `-2`: `isCurrentInfo` made always false | 9 tests, including "a rejected update after the lock timeout does not cancel accepted cleanup" |
 
-Rows marked `-2` belong to the lock-timeout follow-up below and were run at `shaling/v2.9.0-2`. For the two rows with no
-test, add one before changing that code.
+Rows marked `-2` belong to the lock-timeout follow-up below. They were run on the line after the two bypass tests were
+added. The bypass tests turn the switch off between two updates. They need that because the windows they cover are one
+microtask long, and only an update that bypasses the per-participant queue can enter them. Updates that wait in the
+queue, or that leave it after the lock timeout, cannot.
 
 Full SDK suite (Flutter 3.38.4), first with no switch set, then with the switch forced on in every test:
 
 - at `shaling/v2.9.0-1`: 392 passed, 0 failed, 1 skipped; forced on, 391 passed and 1 failed;
-- at `shaling/v2.9.0-2`: 396 passed, 0 failed, 1 skipped; forced on, 395 passed and 1 failed.
+- at `shaling/v2.9.0-2`: 396 passed, 0 failed, 1 skipped; forced on, 395 passed and 1 failed;
+- on the line with the two bypass tests (no new tag, tests only): 398 passed, 0 failed, 1 skipped; forced on, 397
+  passed and 1 failed.
 
 With the switch forced on, the one failure is "the switch defaults to the stock behaviour", as expected.
 

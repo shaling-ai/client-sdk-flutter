@@ -514,6 +514,63 @@ void main() {
     expect(await removing, isTrue);
     expect(agent.trackPublications, isEmpty);
   });
+
+  // Two of the accepted-snapshot checks guard windows one microtask long: right
+  // after the base update, and between adding publications and announcing them.
+  // An update waiting in the queue, or leaving it after the lock timeout, cannot
+  // run inside them; an update that bypasses the queue can. Here the switch is
+  // turned off between two updates, as a remote flag change would do.
+  group('an update that bypasses the queue (switch turned off in between)', () {
+    final extraTrack = lk_models.TrackInfo(sid: 'TR_c', name: 'track-c', type: lk_models.TrackType.AUDIO);
+    late E2EContainer container;
+    late RemoteParticipant agent;
+    late _Recorder rec;
+    setUp(() async {
+      container = E2EContainer();
+      await container.connectRoom();
+      container.wsConnector.onData(update(agentInfo(5, [sipTrack, clientTrack])));
+      await settle();
+      agent = agentOf(container.room)!;
+      rec = _Recorder(container.room);
+    });
+    tearDown(() async => container.dispose());
+
+    test('right after the base update: the superseded update adds no tracks', () async {
+      RemoteParticipant.shouldIgnoreStaleParticipantInfo = () => true;
+      final accepted = agent.updateFromInfo(agentInfo(6, [sipTrack, clientTrack, extraTrack]));
+      RemoteParticipant.shouldIgnoreStaleParticipantInfo = () => false;
+      final bypassing = agent.updateFromInfo(agentInfo(7, [sipTrack, clientTrack]));
+      expect(await accepted, isFalse);
+      expect(await bypassing, isTrue);
+      await settle();
+
+      expect(agent.getTrackPublicationBySid(extraTrack.sid), isNull);
+      expect(rec.published, isNot(contains(extraTrack.sid)));
+      expect(rec.unpublished, isNot(contains(extraTrack.sid)),
+          reason: 'a superseded update must not add a track that the current snapshot then removes');
+    });
+
+    test('after the accepted update added a track: the track is not announced', () async {
+      RemoteParticipant.shouldIgnoreStaleParticipantInfo = () => true;
+      final accepted = agent.updateFromInfo(agentInfo(6, [sipTrack, clientTrack, extraTrack]));
+      late Future<bool> bypassing;
+      // One microtask later the accepted update has passed its first check and
+      // added the publication, and it awaits before announcing it.
+      scheduleMicrotask(() {
+        RemoteParticipant.shouldIgnoreStaleParticipantInfo = () => false;
+        bypassing = agent.updateFromInfo(agentInfo(7, [sipTrack, clientTrack]));
+      });
+      expect(await accepted, isFalse);
+      expect(await bypassing, isTrue);
+      await settle();
+
+      expect(rec.unpublished, contains(extraTrack.sid),
+          reason: 'precondition: the bypassing update ran after the accepted one added the track');
+      expect(rec.published, isNot(contains(extraTrack.sid)),
+          reason: 'a publication the current snapshot does not list must not be announced');
+      expect(agent.getTrackPublicationBySid(extraTrack.sid), isNull);
+    });
+  });
 }
 
 class _FakeMediaStream extends rtc.MediaStream {
