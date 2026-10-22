@@ -373,8 +373,9 @@ class RemoteParticipant extends Participant<RemoteTrackPublication> {
       if (patched) return false;
     }
 
-    // A timed-out update can replace the snapshot while the base-class future
-    // is being awaited, even when both updates passed the version check.
+    // Shaling AI fork patch: a timed-out update can replace the snapshot while
+    // the base-class future is being awaited, even when both updates passed the
+    // version check.
     if (patched && !isCurrentInfo(info)) return false;
     return _updateTracks(info.tracks, currentInfo: patched ? info : null);
   }
@@ -408,15 +409,19 @@ class RemoteParticipant extends Participant<RemoteTrackPublication> {
     }
   }
 
+  // Shaling AI fork patch: [currentInfo] and the bool result are not upstream.
+  // With a null [currentInfo] (switch off) this behaves as stock and returns
+  // true; otherwise it returns whether [currentInfo] is still the accepted one.
   Future<bool> _updateTracks(List<lk_models.TrackInfo> tracks, {lk_models.ParticipantInfo? currentInfo}) async {
     // Add new tracks
     final newPubs = await _addTracks(tracks);
 
     // Emit events for new publications
     for (final pub in newPubs) {
-      // A newer update may have removed/replaced this publication across the
-      // await. Keep announcing retained publications: the newer update saw
-      // them as existing and therefore will not emit their published event.
+      // Shaling AI fork patch: a newer update may have removed or replaced this
+      // publication across the await. Keep announcing retained publications:
+      // the newer update saw them as existing and therefore will not emit
+      // their published event.
       if (currentInfo != null &&
           (isDisposed ||
               !identical(getTrackPublicationBySid(pub.sid), pub) ||
@@ -436,8 +441,9 @@ class RemoteParticipant extends Participant<RemoteTrackPublication> {
     final validSids = tracks.map((e) => e.sid);
     final removeSids = trackPublications.keys.where((e) => !validSids.contains(e)).toSet();
     for (final sid in removeSids) {
-      // Stopping the previous media track may outlive the lock timeout. The
-      // precomputed removal list is no longer authoritative after that await.
+      // Shaling AI fork patch: stopping the previous media track may outlive
+      // the lock timeout. The precomputed removal list is no longer
+      // authoritative after that await.
       if (currentInfo != null && !isCurrentInfo(currentInfo)) return false;
       await removePublishedTrack(sid);
     }
