@@ -121,6 +121,7 @@ class _Harness {
   /// When set, the next signal connect never completes, like a WebSocket
   /// connect that hangs until `Timeouts.connection`.
   bool hangNextConnect = false;
+  Completer<void>? connectGate;
 
   Duration get now => _clock.elapsed;
 
@@ -135,7 +136,10 @@ class _Harness {
       hangNextConnect = false;
       return Completer<LiveKitWebSocket>().future;
     }
-    return ws.connect(uri, options: options, headers: headers, networkOptions: networkOptions);
+    final connected = ws.connect(uri, options: options, headers: headers, networkOptions: networkOptions);
+    final gate = connectGate;
+    if (gate == null) return connected;
+    return gate.future.then((_) => connected);
   }
 
   Future<void> connect() async {
@@ -150,6 +154,7 @@ class _Harness {
     engineListener
       ..on<EngineResumingEvent>((_) => _mark('resuming'))
       ..on<EngineResumedEvent>((_) => _mark('resumed'))
+      ..on<EngineResumeAbortedByLeaveEvent>((_) => _mark('aborted'))
       ..on<EngineFullRestartingEvent>((_) => _mark('full_restarting'))
       ..on<EngineRestartedEvent>((_) => _mark('restarted'));
     final signalListener = client.createListener();
@@ -216,11 +221,13 @@ void main() {
   late _Harness h;
 
   setUp(() async {
+    ResumeLeaveAbort.shouldAbortResumeOnReconnectLeave = null;
     h = _Harness();
     await h.connect();
   });
 
   tearDown(() async {
+    ResumeLeaveAbort.shouldAbortResumeOnReconnectLeave = null;
     await h.dispose();
   });
 
@@ -325,7 +332,10 @@ void main() {
     });
   });
 
-  group('P2 (fails until the patch lands)', () {
+  group('P2', () {
+    setUp(() {
+      ResumeLeaveAbort.shouldAbortResumeOnReconnectLeave = (_) => true;
+    });
     test('Leave{action: RECONNECT} during a resume starts the full reconnect within the retry delay', () async {
       await leaveDuringResume(_reconnectLeave);
       final leaveAt = h.now;
@@ -337,6 +347,171 @@ void main() {
       expect(restart! - leaveAt, lessThan(_retryDelay + const Duration(milliseconds: 150)));
 
       await h.completeFullRestart();
+    });
+  });
+  group('P2 narrow ownership and acceptance boundary', () {
+    setUp(() {
+      ResumeLeaveAbort.shouldAbortResumeOnReconnectLeave = (_) => true;
+    });
+
+    for (final leave in [_reconnectLeave, _legacyReconnectLeave]) {
+      test('reject on current socket, also when connect has not returned: ${leave.leave.action}', () async {
+        final gate = Completer<void>();
+        h.connectGate = gate;
+        h.dropSignal();
+        await h.when('signal_reconnecting', within: const Duration(seconds: 2));
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        h.deliver(leave);
+        await h.when('aborted', within: const Duration(seconds: 1));
+        expect(h.count('full_restarting'), 0);
+        h.connectGate = null;
+        gate.complete();
+        await h.when('full_restarting', within: const Duration(milliseconds: 450));
+        expect(h.count('resumed'), 0);
+        expect(h.count('full_restarting'), 1);
+        await h.completeFullRestart();
+      });
+    }
+
+    test('success response before connect returns is retained', () async {
+      final gate = Completer<void>();
+      h.connectGate = gate;
+      h.dropSignal();
+      await h.when('signal_reconnecting', within: const Duration(seconds: 2));
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      h.deliver(_reconnectResponse);
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      h.connectGate = null;
+      gate.complete();
+      await h.when('resumed', within: const Duration(milliseconds: 200));
+      expect(h.count('aborted'), 0);
+    });
+
+    test('old socket leave cannot abort the new resume', () async {
+      final oldSocketData = h.ws.onData;
+      h.dropSignal();
+      await h.when('signal_open', within: const Duration(seconds: 2));
+      oldSocketData(_reconnectLeave.writeToBuffer());
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(h.count('aborted'), 0);
+      h.deliver(_reconnectResponse);
+      await h.when('resumed', within: const Duration(seconds: 2));
+      expect(h.count('full_restarting'), 0);
+    });
+
+    test('rejection followed by late success cannot announce resumed', () async {
+      await leaveDuringResume(_reconnectLeave);
+      h.deliver(_reconnectResponse);
+      await h.when('full_restarting', within: const Duration(milliseconds: 450));
+      expect(h.count('resumed'), 0);
+      expect(h.count('aborted'), 1);
+      await h.completeFullRestart();
+    });
+
+    test('socket close after rejection still restarts once', () async {
+      await leaveDuringResume(_reconnectLeave);
+      h.dropSignal();
+      await h.when('full_restarting', within: const Duration(milliseconds: 500));
+      expect(h.count('resuming'), 1);
+      expect(h.count('full_restarting'), 1);
+      await h.completeFullRestart();
+    });
+
+    for (final request in [
+      lk_rtc.LeaveRequest(
+          action: lk_rtc.LeaveRequest_Action.RESUME,
+          canReconnect: true,
+          reason: lk_models.DisconnectReason.STATE_MISMATCH),
+      lk_rtc.LeaveRequest(action: lk_rtc.LeaveRequest_Action.RECONNECT, reason: lk_models.DisconnectReason.MIGRATION),
+    ]) {
+      test('preserve excluded leave: ${request.action}/${request.reason}', () async {
+        await leaveDuringResume(lk_rtc.SignalResponse(leave: request));
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        h.deliver(_reconnectResponse);
+        await h.when('resumed', within: const Duration(seconds: 2));
+        expect(h.count('aborted'), 0);
+      });
+    }
+
+    test('accepted response closes rejection window during PC wait', () async {
+      h.setPrimaryPeerConnectionState(rtc.RTCPeerConnectionState.RTCPeerConnectionStateDisconnected);
+      await h.when('signal_open', within: const Duration(seconds: 2));
+      h.deliver(_reconnectResponse);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      h.deliver(_reconnectLeave);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(h.count('aborted'), 0);
+      h.setPrimaryPeerConnectionState(rtc.RTCPeerConnectionState.RTCPeerConnectionStateConnected);
+      await h.when('resumed', within: const Duration(seconds: 2));
+    });
+
+    test('switch is read once even when it changes during an attempt', () async {
+      var reads = 0;
+      ResumeLeaveAbort.shouldAbortResumeOnReconnectLeave = (_) {
+        reads++;
+        return true;
+      };
+      h.dropSignal();
+      await h.when('signal_open', within: const Duration(seconds: 2));
+      ResumeLeaveAbort.shouldAbortResumeOnReconnectLeave = (_) => false;
+      h.deliver(_reconnectLeave);
+      await h.when('full_restarting', within: const Duration(milliseconds: 450));
+      expect(reads, 1);
+      await h.completeFullRestart();
+    });
+
+    for (final mode in ['null', 'false', 'throw']) {
+      test('switch $mode preserves stock response wait', () async {
+        ResumeLeaveAbort.shouldAbortResumeOnReconnectLeave = mode == 'null'
+            ? null
+            : (_) {
+                if (mode == 'throw') throw StateError('configuration unavailable');
+                return false;
+              };
+        final opened = await leaveDuringResume(_reconnectLeave);
+        final restart = await h.when('full_restarting', within: const Duration(seconds: 3));
+        expect(restart - opened, greaterThanOrEqualTo(_connectionTimeout));
+        expect(h.count('aborted'), 0);
+        await h.completeFullRestart();
+      });
+    }
+
+    test('abort catch preserves full upgrade even if another path cleared it', () async {
+      final gate = Completer<void>();
+      h.connectGate = gate;
+      h.dropSignal();
+      await h.when('signal_reconnecting', within: const Duration(seconds: 2));
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      h.deliver(_reconnectLeave);
+      await h.when('aborted', within: const Duration(seconds: 1));
+      h.engine.fullReconnectOnNext = false;
+      h.connectGate = null;
+      gate.complete();
+      await h.when('full_restarting', within: const Duration(milliseconds: 450));
+      expect(h.count('resuming'), 1);
+      await h.completeFullRestart();
+    });
+
+    test('the callback scopes two engines independently', () async {
+      final other = _Harness();
+      await other.connect();
+      try {
+        ResumeLeaveAbort.shouldAbortResumeOnReconnectLeave = (engine) => identical(engine, h.engine);
+        h.dropSignal();
+        other.dropSignal();
+        await h.when('signal_open', within: const Duration(seconds: 2));
+        await other.when('signal_open', within: const Duration(seconds: 2));
+        h.deliver(_reconnectLeave);
+        other.deliver(_reconnectLeave);
+        await h.when('full_restarting', within: const Duration(milliseconds: 450));
+        expect(other.count('full_restarting'), 0);
+        expect(other.count('aborted'), 0);
+        await h.completeFullRestart();
+        await other.when('full_restarting', within: const Duration(seconds: 3));
+        await other.completeFullRestart();
+      } finally {
+        await other.dispose();
+      }
     });
   });
 }

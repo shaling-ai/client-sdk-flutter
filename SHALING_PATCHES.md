@@ -79,6 +79,28 @@ Apps pin only commits listed here. The tip of a line may be ahead of its last ta
 
 ## Patches
 
+### P2: stop waiting after a rejected resume (review candidate)
+
+- Switch: `ResumeLeaveAbort.shouldAbortResumeOnReconnectLeave(Engine)`, read once per
+  attempt; null, false or an exception uses the unchanged stock resume body.
+- Enabled scope: a `STATE_MISMATCH` reconnect leave from the socket opened by the
+  current attempt, before its reconnect response has been accepted. Both protocol
+  action RECONNECT and legacy canReconnect are supported; RESUME retains priority.
+- A socket-bound opaque owner excludes messages from older sockets. The attempt
+  waits for connect to return before throwing `ResumeAbortedByLeaveException`;
+  it never races socket creation. The response wait is woken without an error
+  future, and its timer is always cancelled. The retry catch independently selects
+  full restart even if the leave handler's upgrade is overwritten.
+- Accepted resumes, migration and other leave reasons, idle/full-restart leaves,
+  retry delay, retry budget and PC-trigger policy retain their existing behavior.
+- `EngineResumeAbortedByLeaveEvent` is internal observation of an actual abort.
+  No application data or alarm implementation lives in this public SDK.
+- Tests: `test/core/resume_leave_abort_test.dart`, including stock controls,
+  early replies, old-socket replies, close-after-leave, priority, accepted-response
+  boundary, callback errors, one-read semantics and two independent engines.
+- This candidate is not a release tag. Physical-device acceptance and review
+  remain required before merging and creating the next maintenance tag.
+
 ### P1: out-of-date ParticipantInfo removes live tracks
 
 | | |

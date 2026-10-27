@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by Shaling AI in 2026: abort explicitly rejected resume attempts.
+// (see SHALING_PATCHES.md). Not part of upstream livekit/client-sdk-flutter.
+
 // ignore_for_file: deprecated_member_use_from_same_package
 
 import 'dart:async';
@@ -48,6 +51,8 @@ import '../types/internal.dart';
 import '../types/other.dart';
 import '../utils/data_packet_buffer.dart';
 import '../utils/ttl_map.dart';
+// Shaling AI fork patch P2.
+import 'resume_leave_abort.dart';
 import 'signal_client.dart';
 import 'transport.dart';
 
@@ -134,6 +139,9 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
   final int _reconnectCount = defaultRetryDelaysInMs.length;
 
   bool _attemptingReconnect = false;
+
+  // Shaling AI fork patch P2: owned by exactly one opted-in resume.
+  _ResumeLeaveAttempt? _inFlightResumeAbort;
 
   RegionUrlProvider? _regionUrlProvider;
 
@@ -1098,7 +1106,8 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     } catch (e) {
       _reconnectAttempts = _reconnectAttempts + 1;
       bool recoverable = true;
-      if (e is WebSocketException || e is MediaConnectException) {
+      // Shaling AI fork patch P2: preserve escalation independently of event ordering.
+      if (e is WebSocketException || e is MediaConnectException || e is ResumeAbortedByLeaveException) {
         // cannot resume connection, need to do full reconnect
         fullReconnectOnNext = true;
       }
@@ -1128,7 +1137,85 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     }
   }
 
+  // Shaling AI fork patch P2: read once, with a literal stock path when disabled.
   Future<void> resumeConnection(
+    ClientDisconnectReason reason, {
+    lk_models.ReconnectReason? reconnectReason,
+  }) async {
+    var enabled = false;
+    try {
+      enabled = ResumeLeaveAbort.shouldAbortResumeOnReconnectLeave?.call(this) ?? false;
+    } catch (_) {
+      // A configuration callback must never break reconnection.
+    }
+    if (!enabled) {
+      return _resumeConnectionStock(reason, reconnectReason: reconnectReason);
+    }
+    if (_isClosed) return;
+    final attempt = _ResumeLeaveAttempt();
+    _inFlightResumeAbort = attempt;
+    try {
+      events.emit(const EngineResumingEvent());
+      // Never abandon connect: its late completion owns socket state.
+      await signalClient.connect(url!, token!,
+          connectOptions: connectOptions,
+          roomOptions: roomOptions,
+          reconnect: true,
+          reconnectReason: reconnectReason,
+          resumeAttempt: attempt);
+      await _waitForResumeResponse(attempt);
+      attempt.check();
+      if (_hasPublished) {
+        await publisher!.createAndSendOffer(const RTCOfferOptions(iceRestart: true));
+      }
+      attempt.check();
+      final isConnected = (await primary?.pc.getConnectionState())?.isConnected() ?? false;
+      attempt.check();
+      // An accepted resume is outside P2's deliberately narrow rejection window.
+      if (!isConnected) {
+        subscriber!.restartingIce = true;
+        await events.waitFor<EnginePeerStateUpdatedEvent>(
+          filter: (event) => event.isPrimary && event.state.isConnected(),
+          duration: connectOptions.timeouts.peerConnection,
+          onTimeout: () =>
+              throw MediaConnectException('resumeConnection: Timed out waiting for EnginePeerStateUpdatedEvent'),
+        );
+      }
+      attempt.check();
+      _isReconnecting = false;
+      events.emit(const EngineResumedEvent());
+    } finally {
+      if (identical(_inFlightResumeAbort, attempt)) _inFlightResumeAbort = null;
+    }
+  }
+
+  // Shaling AI fork patch P2: an attempt-owned wakeup; no stream listener can leak.
+  Future<void> _waitForResumeResponse(_ResumeLeaveAttempt attempt) async {
+    final result = Completer<void>();
+    void finish() {
+      if (!result.isCompleted) result.complete();
+    }
+
+    final timer = Timer(connectOptions.timeouts.connection, () {
+      if (!result.isCompleted) {
+        result.completeError(ConnectException('resumeConnection: Timed out waiting for SignalReconnectedEvent',
+            reason: ConnectionErrorReason.Timeout));
+      }
+    });
+    attempt.wake = finish;
+    try {
+      attempt.check();
+      if (attempt.responseReady) finish();
+      await result.future;
+      attempt.check();
+    } finally {
+      attempt.wake = null;
+      timer.cancel();
+    }
+  }
+
+  // Shaling AI fork patch P2: the previous resume body is unchanged below.
+  Future<void> _resumeConnectionStock(
     ClientDisconnectReason reason, {
     lk_models.ReconnectReason? reconnectReason,
   }) async {
@@ -1325,6 +1412,12 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       events.emit(EngineJoinResponseEvent(response: event.response));
     })
     ..on<SignalReconnectResponseEvent>((event) async {
+      // Shaling AI fork patch P2: acceptance and rejection are mutually exclusive.
+      final owner = event.resumeAttempt;
+      if (owner is _ResumeLeaveAttempt) {
+        if (owner.aborted) return; // late reply from an already rejected attempt
+        if (identical(owner, _inFlightResumeAbort)) owner.accepted = true;
+      }
       final iceServersFromServer = event.response.iceServers.map((e) => e.toSDKType()).toList();
 
       if (iceServersFromServer.isNotEmpty) {
@@ -1354,6 +1447,11 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
         await _resendReliableMessagesForResume(event.response.lastMessageSeq);
       }
 
+      // Shaling AI fork patch P2: remember an early response before connect returns.
+      if (owner is _ResumeLeaveAttempt && identical(owner, _inFlightResumeAbort)) {
+        owner.responseReady = true;
+        owner.wake?.call();
+      }
       events.emit(const SignalReconnectedEvent());
     })
     ..on<SignalConnectedEvent>((event) async {
@@ -1446,6 +1544,17 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
         // reconnect immediately instead of waiting for next attempt
         await handleReconnect(ClientDisconnectReason.leaveReconnect);
       } else if (event.action == lk_rtc.LeaveRequest_Action.RECONNECT || event.canReconnect) {
+        // Shaling AI fork patch P2: only a current-socket, pre-acceptance rejection.
+        final attempt = _inFlightResumeAbort;
+        if (attempt != null &&
+            identical(event.resumeAttempt, attempt) &&
+            !attempt.accepted &&
+            !attempt.aborted &&
+            event.reason == lk_models.DisconnectReason.STATE_MISMATCH) {
+          attempt.aborted = true;
+          attempt.wake?.call();
+          events.emit(EngineResumeAbortedByLeaveEvent(event));
+        }
         fullReconnectOnNext = true;
         // reconnect immediately instead of waiting for next attempt
         await handleReconnect(ClientDisconnectReason.leaveReconnect);
@@ -1663,4 +1772,15 @@ Future<String?> getConnectedAddress(rtc.RTCPeerConnection pc) async {
   }
   final selectedID = report.values['remoteCandidateId'] as String;
   return candidates[selectedID];
+}
+
+// Shaling AI fork patch P2: no error future and no callbacks survive the wait.
+class _ResumeLeaveAttempt {
+  bool accepted = false;
+  bool responseReady = false;
+  bool aborted = false;
+  void Function()? wake;
+  void check() {
+    if (aborted) throw const ResumeAbortedByLeaveException();
+  }
 }

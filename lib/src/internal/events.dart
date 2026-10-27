@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by Shaling AI in 2026: abort explicitly rejected resume attempts.
+// (see SHALING_PATCHES.md). Not part of upstream livekit/client-sdk-flutter.
+
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:meta/meta.dart';
@@ -149,8 +152,11 @@ class SignalJoinResponseEvent with SignalEvent, InternalEvent {
 // Received a ReconnectResponse from the server.
 class SignalReconnectResponseEvent with SignalEvent, InternalEvent {
   final lk_rtc.ReconnectResponse response;
+  // Shaling AI fork patch P2: opaque ownership of the socket delivering this reply.
+  final Object? resumeAttempt;
   const SignalReconnectResponseEvent({
     required this.response,
+    this.resumeAttempt,
   });
 
   @override
@@ -466,8 +472,11 @@ class SignalLeaveEvent with SignalEvent, InternalEvent {
   lk_models.DisconnectReason get reason => request.reason;
   lk_rtc.RegionSettings? get regions => request.hasRegions() ? request.regions : null;
   final lk_rtc.LeaveRequest request;
+  // Shaling AI fork patch P2: opaque ownership of the socket delivering this reply.
+  final Object? resumeAttempt;
   const SignalLeaveEvent({
     required this.request,
+    this.resumeAttempt,
   });
 
   @override
@@ -789,4 +798,11 @@ class TrackEndedEvent with TrackEvent, InternalEvent {
 
   @override
   String toString() => '${runtimeType}(track: ${track})';
+}
+
+// Shaling AI fork patch P2: report actual aborts, rather than inferring them from leaves.
+@internal
+class EngineResumeAbortedByLeaveEvent with InternalEvent, EngineEvent {
+  final SignalLeaveEvent leave;
+  const EngineResumeAbortedByLeaveEvent(this.leave);
 }
