@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by Shaling AI in 2026: abort explicitly rejected resume attempts.
+// (see SHALING_PATCHES.md). Not part of upstream livekit/client-sdk-flutter.
+
 import 'src/types/rpc.dart' show kRpcVersion;
 
 export 'src/connection_check/checks/checker.dart';
@@ -20,6 +23,8 @@ export 'src/connection_check/checks/connection_protocol.dart' show ProtocolStats
 export 'src/connection_check/connection_check.dart';
 export 'src/connection_check/events.dart';
 export 'src/constants.dart';
+// Shaling AI fork patch P2: per-engine, default-off resume rejection switch.
+export 'src/core/resume_leave_abort.dart';
 export 'src/core/room.dart';
 export 'src/core/room_preconnect.dart';
 export 'src/data_stream/stream_reader.dart';

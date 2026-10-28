@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by Shaling AI in 2026: abort explicitly rejected resume attempts.
+// (see SHALING_PATCHES.md). Not part of upstream livekit/client-sdk-flutter.
+
 /// Base class for Exceptions thrown by the LiveKit SDK
 abstract class LiveKitException implements Exception {
   final String message;
@@ -113,4 +116,9 @@ class LiveKitE2EEException extends LiveKitException {
 
 class UnexpectedConnectionState extends LiveKitException {
   UnexpectedConnectionState([String msg = 'Unexpected connection state']) : super._(msg);
+}
+
+// Shaling AI fork patch P2: the reconnect owner handles this like a failed resume.
+class ResumeAbortedByLeaveException extends LiveKitException {
+  const ResumeAbortedByLeaveException() : super._('Resume rejected by a state-mismatch leave');
 }

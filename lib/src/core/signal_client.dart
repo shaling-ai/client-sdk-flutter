@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by Shaling AI in 2026: abort explicitly rejected resume attempts.
+// (see SHALING_PATCHES.md). Not part of upstream livekit/client-sdk-flutter.
+
 import 'dart:async';
 import 'dart:collection';
 
@@ -105,6 +108,8 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
     required RoomOptions roomOptions,
     bool reconnect = false,
     lk_models.ReconnectReason? reconnectReason,
+    // Shaling AI fork patch P2: only the opted-in resume supplies an owner.
+    Object? resumeAttempt,
   }) async {
     if (!kIsWeb && !lkPlatformIsTest()) {
       _connectivityResult = await Connectivity().checkConnectivity();
@@ -156,7 +161,8 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
       var future = _wsConnector(
         rtcUri,
         options: WebSocketEventHandlers(
-          onData: _onSocketData,
+          // Shaling AI fork patch P2: retain the old callback when disabled.
+          onData: resumeAttempt == null ? _onSocketData : (data) => _onSocketData(data, resumeAttempt: resumeAttempt),
           onDispose: _onSocketDispose,
           onError: _onSocketError,
         ),
@@ -264,7 +270,8 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
     _ws?.send(req.writeToBuffer());
   }
 
-  Future<void> _onSocketData(dynamic message) async {
+  // Shaling AI fork patch P2: preserve the originating socket across async delivery.
+  Future<void> _onSocketData(dynamic message, {Object? resumeAttempt}) async {
     if (message is! List<int>) return;
     final msg = lk_rtc.SignalResponse.fromBuffer(message);
 
@@ -322,7 +329,8 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
         ));
         break;
       case lk_rtc.SignalResponse_Message.leave:
-        events.emit(SignalLeaveEvent(request: msg.leave));
+        // Shaling AI fork patch P2: attach socket ownership, without changing dispatch.
+        events.emit(SignalLeaveEvent(request: msg.leave, resumeAttempt: resumeAttempt));
         break;
       case lk_rtc.SignalResponse_Message.mute:
         events.emit(SignalRemoteMuteTrackEvent(
@@ -366,7 +374,8 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
         _resetPingTimeout();
         break;
       case lk_rtc.SignalResponse_Message.reconnect:
-        events.emit(SignalReconnectResponseEvent(response: msg.reconnect));
+        // Shaling AI fork patch P2: acceptance closes the rejection window.
+        events.emit(SignalReconnectResponseEvent(response: msg.reconnect, resumeAttempt: resumeAttempt));
         break;
       case lk_rtc.SignalResponse_Message.requestResponse:
         logger.fine('received request response: ${msg.requestResponse.reason}');
