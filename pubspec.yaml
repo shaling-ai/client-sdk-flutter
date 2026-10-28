@@ -52,6 +52,8 @@ dependencies:
   json_annotation: ^4.9.0
 
   # Fix version to avoid version conflicts between WebRTC-SDK pods, which both this package and flutter_webrtc depend on.
+  # Shaling AI fork patch P3: apps override this with flutter_webrtc 1.5.2 from
+  # shaling-ai/flutter-webrtc, which pins the same WebRTC-SDK as ios/livekit_client.podspec.
   flutter_webrtc: 1.5.2
   dart_webrtc: ^1.8.0
 

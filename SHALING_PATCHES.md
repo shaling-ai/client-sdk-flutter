@@ -80,6 +80,32 @@ Apps pin only commits listed here. The tip of a line may be ahead of its last ta
 
 ## Patches
 
+### P3: WebRTC-SDK 144.7559.10 on iOS and macOS (review candidate)
+
+| | |
+|---|---|
+| Files | `ios/livekit_client.podspec`, `macos/livekit_client.podspec`. No Dart, Swift or Android change. |
+| Pairs with | `flutter_webrtc` 1.5.2 from [shaling-ai/flutter-webrtc](https://github.com/shaling-ai/flutter-webrtc) line `shaling/v1.5.2`, patch W1, which pins the same binary. `pubspec.yaml` keeps `flutter_webrtc: 1.5.2`; the app overrides it with that git commit. |
+| Switch | None. This is a crash fix inside the native binary; nothing that works on `.09` changes. |
+| Upstream | flutter-webrtc/flutter-webrtc#2158 (in `flutter_webrtc 1.6.0+hotfix.1`). Upstream `livekit_client` 2.10.0 and 2.11.0 still pin `.09`. |
+| Drop when | The line moves to an upstream `livekit_client` whose podspec pins `144.7559.10` or later. |
+
+**Problem.** WebRTC-SDK `144.7559.09` can crash with `EXC_BAD_ACCESS` on a WebRTC worker thread: `AudioEngineDevice`
+reaches `FineAudioBuffer::ResetPlayout()` with a null `fine_audio_buffer_` (flutter-webrtc/flutter-webrtc#2148,
+#2153). It is typically reached while `-[RTCPeerConnection close]` runs on the main thread with the app in the
+background. webrtc-sdk/webrtc@f47af7bc9658 fixes it and shipped in `144.7559.10`.
+
+**Change.** Both Darwin podspecs pin `144.7559.10`. Every pod that depends on `WebRTC-SDK` must pin the same version,
+so this commit only resolves together with a `flutter_webrtc` that pins `.10`. With stock `flutter_webrtc 1.5.2`,
+`pod install` fails with a version conflict instead of building.
+
+**Why the pin alone is safe.** `.09` and `.10` have byte-identical `WebRTC.framework/Headers` and `module.modulemap`
+(`ios-arm64` and simulator slices) and the same exported symbol set, so the Swift sources build unchanged. Android
+keeps `io.github.webrtc-sdk:android:144.7559.09`; the defect is in the Darwin audio device module only.
+
+**Tests.** No unit test reaches this path. Physical-device acceptance is required before merging and tagging: on iOS,
+end a call that publishes the microphone while the app is in the background, several times.
+
 ### P2: stop waiting after a rejected resume
 
 - Since: `shaling/v2.9.0-3` (commit `228e27c7`, #4).
