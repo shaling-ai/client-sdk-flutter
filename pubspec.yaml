@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Modified by Shaling AI in 2026: flutter_webrtc pairing for WebRTC-SDK 144.7559.10
+# (see SHALING_PATCHES.md). Not part of upstream livekit/client-sdk-flutter.
+
 name: livekit_client
 description: Flutter Client SDK for LiveKit. Build real-time video and audio
   into your apps. Supports iOS, Android, and Web.
