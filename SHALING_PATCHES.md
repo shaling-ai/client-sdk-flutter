@@ -76,10 +76,13 @@ Apps pin only commits listed here. The tip of a line may be ahead of its last ta
 |---|---|---|---|
 | `shaling/v2.9.0-1` | `8880cb57c54dfc66ec9c193d524e2bfb8408f1eb` | `v2.9.0` (`8f86c55`) | P1 |
 | `shaling/v2.9.0-2` | `b3e7057d6f33e8fac4dfea54e55453b82b76ec53` | `v2.9.0` (`8f86c55`) | P1, with its lock-timeout follow-up (#1) |
+| `shaling/v2.9.0-3` | `228e27c7b2712f82d906f8c01d87faa68d1472fe` | `v2.9.0` (`8f86c55`) | P1 and P2 (#4) |
 
 ## Patches
 
-### P2: stop waiting after a rejected resume (review candidate)
+### P2: stop waiting after a rejected resume
+
+- Since: `shaling/v2.9.0-3` (commit `228e27c7`, #4).
 
 - Switch: `ResumeLeaveAbort.shouldAbortResumeOnReconnectLeave(Engine)`, read once per
   attempt; null, false or an exception uses the unchanged stock resume body.
@@ -98,8 +101,12 @@ Apps pin only commits listed here. The tip of a line may be ahead of its last ta
 - Tests: `test/core/resume_leave_abort_test.dart`, including stock controls,
   early replies, old-socket replies, close-after-leave, priority, accepted-response
   boundary, callback errors, one-read semantics and two independent engines.
-- This candidate is not a release tag. Physical-device acceptance and review
-  remain required before merging and creating the next maintenance tag.
+- Validation: 23 focused tests passed; full suite 421 passed / 1 skipped both
+  with the default unset and with the default forced on. Six mutations were
+  detected. Controlled physical-device testing received a real rejection and
+  reduced leave-to-full-restart from 15,312 ms (off) to 319 ms (on), preserving
+  the session in the successful enabled retry. This does not establish the
+  natural production trigger or replace consumer release acceptance.
 
 ### P1: out-of-date ParticipantInfo removes live tracks
 
