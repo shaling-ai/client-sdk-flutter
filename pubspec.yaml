@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Modified by Shaling AI in 2026: flutter_webrtc pairing for WebRTC-SDK 144.7559.10
+# (see SHALING_PATCHES.md). Not part of upstream livekit/client-sdk-flutter.
+
 name: livekit_client
 description: Flutter Client SDK for LiveKit. Build real-time video and audio
   into your apps. Supports iOS, Android, and Web.
@@ -52,6 +55,8 @@ dependencies:
   json_annotation: ^4.9.0
 
   # Fix version to avoid version conflicts between WebRTC-SDK pods, which both this package and flutter_webrtc depend on.
+  # Shaling AI fork patch P3: apps override this with flutter_webrtc 1.5.2 from
+  # shaling-ai/flutter-webrtc, which pins the same WebRTC-SDK as ios/livekit_client.podspec.
   flutter_webrtc: 1.5.2
   dart_webrtc: ^1.8.0
 

@@ -1,3 +1,5 @@
+# Modified by Shaling AI in 2026: WebRTC-SDK 144.7559.10 (see SHALING_PATCHES.md).
+# Not part of upstream livekit/client-sdk-flutter.
 Pod::Spec.new do |s|
   s.name                = 'livekit_client'
   s.version             = '2.9.0'
@@ -16,6 +18,9 @@ Pod::Spec.new do |s|
   s.static_framework    = true
 
   s.dependency 'FlutterMacOS'
-  s.dependency 'WebRTC-SDK', '144.7559.09'
+  # Shaling AI fork patch P3: 144.7559.10 fixes the AudioEngineDevice null
+  # FineAudioBuffer crash of .09. flutter_webrtc must pin the same version
+  # (shaling-ai/flutter-webrtc patch W1; see SHALING_PATCHES.md P3).
+  s.dependency 'WebRTC-SDK', '144.7559.10'
   s.dependency 'flutter_webrtc'
 end
