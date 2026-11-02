@@ -206,8 +206,9 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     preConnectAudioBuffer = PreConnectAudioBuffer(this);
 
     onDispose(() async {
-      // clean up routine
-      await _cleanUp();
+      // Android cleanup must finish before Disposable marks the Room disposed;
+      // its onDispose callbacks intentionally swallow errors.
+      if (!lkPlatformIs(PlatformType.android)) await _cleanUp();
       // reject any in-flight RPC calls
       _rpcClientManager.dispose();
       // dispose preConnectAudioBuffer
@@ -324,11 +325,11 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       await AudioManager.instance.setSpeakerOutputPreferred(legacySpeakerOn);
     }
 
-    // configure audio for native platform
-    await NativeAudioManagement.start();
-
     var didConnect = false;
     try {
+      if (lkPlatformIs(PlatformType.android)) await _androidCleanupTail;
+      // Includes partial native-start failure in the exact owner's cleanup.
+      await NativeAudioManagement.start(owner: _audioSessionOwner);
       await engine.connect(
         _regionUrl ?? url,
         token,
@@ -369,7 +370,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       }
     } finally {
       if (!didConnect) {
-        await NativeAudioManagement.stop();
+        await _releaseAudioSession();
       }
     }
   }
@@ -598,7 +599,20 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     })
     ..on<EngineDisconnectedEvent>((event) async {
       if (!engine.fullReconnectOnNext || event.reason == DisconnectReason.clientInitiated) {
-        await _cleanUp(disposeLocalParticipant: false);
+        if (lkPlatformIs(PlatformType.android)) {
+          try {
+            // Bound terminal delivery, not the native operation. _androidCleanupTail
+            // retains the real Future; subsequent acquire/dispose still waits for it.
+            await _cleanUp(disposeLocalParticipant: false).timeout(const Duration(seconds: 2));
+          } catch (error, stack) {
+            // Stream listeners do not await async handlers. Preserve the lease
+            // for an explicit disconnect/dispose retry without losing terminal
+            // delivery or creating an unhandled asynchronous error.
+            logger.warning('Android room cleanup remains pending', error, stack);
+          }
+        } else {
+          await _cleanUp(disposeLocalParticipant: false);
+        }
         events.emit(RoomDisconnectedEvent(reason: event.reason));
         notifyListeners();
       }
@@ -703,11 +717,46 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       }
     });
 
+  final Object _audioSessionOwner = Object();
+  Future<bool>? _androidDisposeFlight;
+  Future<void> _androidCleanupTail = Future<void>.value();
+  bool _androidNativeReleasePending = false;
+
+  @override
+  Future<bool> dispose() {
+    if (!lkPlatformIs(PlatformType.android)) return super.dispose();
+    final existing = _androidDisposeFlight;
+    if (existing != null) return existing;
+    late final Future<bool> flight;
+    flight = _disposeAndroid().whenComplete(() {
+      if (identical(_androidDisposeFlight, flight)) _androidDisposeFlight = null;
+    });
+    _androidDisposeFlight = flight;
+    return flight;
+  }
+
+  Future<bool> _disposeAndroid() async {
+    if (!isDisposed) {
+      // A failed last-owner stop must propagate and leave this Room retryable.
+      // onDispose alone would swallow it and permanently mark the Room disposed.
+      await _cleanUp();
+    }
+    return super.dispose();
+  }
+
+  Future<void> _releaseAudioSession() async {
+    if (lkPlatformIs(PlatformType.android)) _androidNativeReleasePending = true;
+    await NativeAudioManagement.stop(owner: _audioSessionOwner);
+    _androidNativeReleasePending = false;
+  }
+
   /// Disconnects from the room, notifying server of disconnection.
   Future<void> disconnect() async {
     final bool isPendingReconnect = engine.isPendingReconnect;
     if (engine.isClosed && !isPendingReconnect && engine.connectionState == ConnectionState.disconnected) {
       logger.warning('Engine is already closed');
+      // The engine can be closed while an earlier native stop is still pending.
+      if (lkPlatformIs(PlatformType.android)) await _cleanUp();
       return;
     }
     await engine.disconnect();
@@ -1033,8 +1082,22 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
 
 extension RoomPrivateMethods on Room {
   // resets internal state to a re-usable state
-  Future<void> _cleanUp({bool disposeLocalParticipant = true}) async {
+  Future<void> _cleanUp({bool disposeLocalParticipant = true}) {
+    if (!lkPlatformIs(PlatformType.android)) {
+      return _cleanUpResources(disposeLocalParticipant: disposeLocalParticipant);
+    }
+    final next = _androidCleanupTail.then(
+      (_) => _cleanUpResources(disposeLocalParticipant: disposeLocalParticipant),
+    );
+    _androidCleanupTail = next.catchError((Object _) {});
+    return next;
+  }
+
+  Future<void> _cleanUpResources({required bool disposeLocalParticipant}) async {
     logger.fine('[${objectId}] cleanUp()');
+    // A prior strict stop failure happened after media cleanup. Retry it before
+    // touching already disposed tracks/engine so those cannot hide the lease.
+    if (_androidNativeReleasePending) await _releaseAudioSession();
 
     // clean up RemoteParticipants
     final participants = _remoteParticipants.toList();
@@ -1061,7 +1124,7 @@ extension RoomPrivateMethods on Room {
     // clean up engine
     await engine.cleanUp();
 
-    await NativeAudioManagement.stop();
+    await _releaseAudioSession();
 
     // reset params
     _roomInfo = null;

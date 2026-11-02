@@ -49,6 +49,7 @@ internal class LKAudioSwitchManager(private val context: Context) {
 
   private var audioSwitch: AbstractAudioSwitch? = null
   private var isActive = false
+  private var appliedSessionConfig: SessionConfig? = null
 
   // Configuration. Defaults mirror a communication/VoIP session and match the
   // AudioSwitchHandler defaults in the LiveKit Android SDK.
@@ -63,14 +64,9 @@ internal class LKAudioSwitchManager(private val context: Context) {
   private var speakerOutputPreferred = true
   private var speakerOutputForced = false
 
-  /**
-   * Apply an audio session configuration. Unspecified keys keep their current
-   * value. When the session is already active, changes that only take effect at
-   * activate() time trigger a deactivate and activate cycle so they apply live.
-   */
+  /** Configure and activate on one queue; completion means native work ran. */
   @Synchronized
-  fun configure(configuration: Map<String, Any?>) {
-    val previous = sessionConfigSnapshot()
+  fun configureAndStart(configuration: Map<String, Any?>, complete: (Throwable?) -> Unit) {
     (configuration["manageAudioFocus"] as? Boolean)?.let { manageAudioFocus = it }
     audioModeForName(configuration["androidAudioMode"] as? String)?.let { audioMode = it }
     focusModeForName(configuration["androidAudioFocusMode"] as? String)?.let { focusMode = it }
@@ -78,22 +74,27 @@ internal class LKAudioSwitchManager(private val context: Context) {
     usageTypeForName(configuration["androidAudioAttributesUsageType"] as? String)?.let { audioAttributeUsageType = it }
     contentTypeForName(configuration["androidAudioAttributesContentType"] as? String)?.let { audioAttributeContentType = it }
     (configuration["forceHandleAudioRouting"] as? Boolean)?.let { forceHandleAudioRouting = it }
+    (configuration["speakerOutputPreferred"] as? Boolean)?.let { speakerOutputPreferred = it }
+    (configuration["speakerOutputForced"] as? Boolean)?.let { speakerOutputForced = it && speakerOutputPreferred }
     val sessionConfig = sessionConfigSnapshot()
-    val sessionConfigChanged = sessionConfig != previous
     val speakerRouting = speakerRoutingSnapshot()
-
-    handler.post {
-      val switch = audioSwitch ?: return@post
+    dispatchAudioSessionOperation(handler::post, complete) {
+      val existing = audioSwitch
+      val switch = existing ?: createSwitch(speakerRouting).also { audioSwitch = it }
+      // Retain a partially started switch if start/configure/activate throws;
+      // an exact last-owner retry can still stop that native resource.
       applyConfiguration(switch, sessionConfig)
-      // AudioSwitch applies the audio mode, focus, and attributes at activate()
-      // time, so a live reconfiguration (e.g. communication to media) needs a
-      // deactivate and activate cycle to take effect on an already active
-      // session. Reassert speaker routing afterward.
-      if (isActive && sessionConfigChanged) {
+      if (existing == null) switch.start { _, _ -> }
+      if (isActive && sessionConfig != appliedSessionConfig) {
         switch.deactivate()
-        switch.activate()
-        applySpeakerRouting(switch, speakerRouting)
+        isActive = false
       }
+      if (!isActive) {
+        switch.activate()
+        isActive = true
+      }
+      applySpeakerRouting(switch, speakerRouting)
+      appliedSessionConfig = sessionConfig
     }
   }
 
@@ -110,28 +111,14 @@ internal class LKAudioSwitchManager(private val context: Context) {
     forceHandleAudioRouting = forceHandleAudioRouting,
   )
 
-  /** Create (if needed) and activate the audio session: acquire focus, set mode and routing. */
+  /** Stop on the native queue; retain state on failure so release can retry. */
   @Synchronized
-  fun start() {
-    val sessionConfig = sessionConfigSnapshot()
-    val speakerRouting = speakerRoutingSnapshot()
-    handler.post {
-      val switch = audioSwitch ?: createSwitch(sessionConfig, speakerRouting).also { audioSwitch = it }
-      if (!isActive) {
-        switch.activate()
-        applySpeakerRouting(switch, speakerRouting)
-        isActive = true
-      }
-    }
-  }
-
-  /** Deactivate and tear down the audio session: release focus and restore the previous mode. */
-  @Synchronized
-  fun stop() {
-    handler.post {
+  fun stop(complete: (Throwable?) -> Unit) {
+    dispatchAudioSessionOperation(handler::post, complete) {
       audioSwitch?.stop()
       audioSwitch = null
       isActive = false
+      appliedSessionConfig = null
     }
   }
 
@@ -142,6 +129,7 @@ internal class LKAudioSwitchManager(private val context: Context) {
       audioSwitch?.stop()
       audioSwitch = null
       isActive = false
+      appliedSessionConfig = null
       thread.quitSafely()
     }
   }
@@ -162,7 +150,6 @@ internal class LKAudioSwitchManager(private val context: Context) {
   }
 
   private fun createSwitch(
-    sessionConfig: SessionConfig,
     speakerRouting: SpeakerRouting,
   ): AbstractAudioSwitch {
     val focusListener = AudioManager.OnAudioFocusChangeListener { }
@@ -179,8 +166,6 @@ internal class LKAudioSwitchManager(private val context: Context) {
       else ->
         LegacyAudioSwitch(context, false, focusListener, speakerRouting.preferredDeviceList)
     }
-    applyConfiguration(switch, sessionConfig)
-    switch.start { _, _ -> }
     return switch
   }
 
@@ -312,4 +297,28 @@ private fun contentTypeForName(name: String?): Int? = when (name) {
   "speech" -> AudioAttributes.CONTENT_TYPE_SPEECH
   "unknown" -> AudioAttributes.CONTENT_TYPE_UNKNOWN
   else -> null
+}
+
+/** A queued receipt is not completion. Never acknowledge before operation ran. */
+internal fun dispatchAudioSessionOperation(
+  post: (Runnable) -> Boolean,
+  complete: (Throwable?) -> Unit,
+  operation: () -> Unit,
+) {
+  val work = Runnable {
+    val failure = try {
+      operation()
+      null
+    } catch (error: Throwable) {
+      error
+    }
+    complete(failure)
+  }
+  val accepted = try {
+    post(work)
+  } catch (error: Throwable) {
+    complete(error)
+    return
+  }
+  if (!accepted) complete(IllegalStateException("Audio session thread is unavailable"))
 }

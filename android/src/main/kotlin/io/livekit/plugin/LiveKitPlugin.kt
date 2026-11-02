@@ -443,14 +443,31 @@ class LiveKitPlugin : FlutterPlugin, MethodCallHandler {
       "configureAndroidAudioSession" -> {
         @Suppress("UNCHECKED_CAST")
         val configuration = call.arguments as? Map<String, Any?> ?: emptyMap()
-        audioSwitchManager?.configure(configuration)
-        audioSwitchManager?.start()
-        result.success(null)
+        val manager = audioSwitchManager
+        if (manager == null) {
+          result.error("audio_session_unavailable", "Audio session manager is unavailable", null)
+        } else {
+          manager.configureAndStart(configuration) { error ->
+            mainHandler.post {
+              if (error == null) result.success(null)
+              else result.error("audio_session_failed", "Audio session startup failed", null)
+            }
+          }
+        }
       }
 
       "stopAndroidAudioSession" -> {
-        audioSwitchManager?.stop()
-        result.success(null)
+        val manager = audioSwitchManager
+        if (manager == null) {
+          result.error("audio_session_unavailable", "Audio session manager is unavailable", null)
+        } else {
+          manager.stop { error ->
+            mainHandler.post {
+              if (error == null) result.success(null)
+              else result.error("audio_session_failed", "Audio session stop failed", null)
+            }
+          }
+        }
       }
 
       "setAndroidSpeakerphoneOn" -> {

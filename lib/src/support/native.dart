@@ -176,21 +176,25 @@ class Native {
 
   /// Configure and activate LiveKit's Android audio session (mode/focus/routing).
   @internal
-  static Future<void> configureAndroidAudioSession(Map<String, dynamic> configuration) async {
+  static Future<void> configureAndroidAudioSession(Map<String, dynamic> configuration, {bool strict = false}) async {
     try {
       await channel.invokeMethod<void>('configureAndroidAudioSession', configuration);
     } catch (error) {
       logger.warning('configureAndroidAudioSession did throw $error');
+      // Room ownership must retain partial native startup for exact cleanup.
+      if (strict) rethrow;
     }
   }
 
   /// Deactivate LiveKit's Android audio session (release focus, restore mode).
   @internal
-  static Future<void> stopAndroidAudioSession() async {
+  static Future<void> stopAndroidAudioSession({bool strict = false}) async {
     try {
       await channel.invokeMethod<void>('stopAndroidAudioSession');
     } catch (error) {
       logger.warning('stopAndroidAudioSession did throw $error');
+      // A failed last-owner release is not a successful teardown receipt.
+      if (strict) rethrow;
     }
   }
 
