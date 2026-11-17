@@ -58,6 +58,39 @@ public class LiveKitPlugin: NSObject, FlutterPlugin {
     var channel: FlutterMethodChannel?
     var audioEngineObserver: LKAudioEngineObserver?
 
+    // BEGIN RecordingRecoveryPolicyBridge
+    #if os(iOS)
+    public enum RecordingRecoveryPolicyError: Error {
+        case observerUnavailable
+        case recordingPolicyUnavailable
+        case recoveryInProgress
+    }
+
+    private static let recordingRecoveryObserverLock = NSLock()
+    private static weak var recordingRecoveryObserver: LKAudioEngineObserver?
+
+    private static func registerRecordingRecoveryObserver(_ observer: LKAudioEngineObserver) {
+        recordingRecoveryObserverLock.lock()
+        recordingRecoveryObserver = observer
+        recordingRecoveryObserverLock.unlock()
+    }
+
+    /// Keeps the current recording session policy through one synchronous ADM
+    /// recovery transaction. The caller owns call/mute/cancellation checks and
+    /// must keep playout enabled. This does not itself restart an engine.
+    ///
+    /// The operation runs on the calling thread, with no observer lock held.
+    /// Ordinary recording-disable transitions outside this scope are unchanged.
+    public static func withRecordingRecoveryPolicy<Result>(_ operation: () throws -> Result) throws -> Result {
+        recordingRecoveryObserverLock.lock()
+        let observer = recordingRecoveryObserver
+        recordingRecoveryObserverLock.unlock()
+        guard let observer else { throw RecordingRecoveryPolicyError.observerUnavailable }
+        return try observer.withRecordingRecoveryPolicy(operation)
+    }
+    #endif
+    // END RecordingRecoveryPolicyBridge
+
     #if os(iOS)
     var cancellable = Set<AnyCancellable>()
     #endif
@@ -88,6 +121,9 @@ public class LiveKitPlugin: NSObject, FlutterPlugin {
         let audioEngineObserver = LKAudioEngineObserver(channel: channel)
         instance.audioEngineObserver = audioEngineObserver
         FlutterWebRTCPlugin.setAudioDeviceModuleObserver(audioEngineObserver)
+        #if os(iOS)
+        registerRecordingRecoveryObserver(audioEngineObserver)
+        #endif
 
         // An AppDelegate may have gated engine availability before the Flutter
         // engine existed (CallKit killed-state wake). Apply it now, before any
@@ -891,6 +927,10 @@ class LKAudioEngineObserver: NSObject, RTCAudioDeviceModuleDelegate {
     // Last recording state seen, so an immediate re-apply (e.g. speaker toggle
     // while the engine is running) can resolve the category from current state.
     private var lastIsRecordingEnabled = false
+    // An explicit stopped-engine recovery temporarily disables recording while
+    // playout stays enabled. Keep the current recording policy for that narrow
+    // transaction instead of switching to the ordinary playout-only preset.
+    private var isRecordingRecoveryPolicyRetained = false
     #endif
 
     init(channel: FlutterMethodChannel) {
@@ -902,6 +942,30 @@ class LKAudioEngineObserver: NSObject, RTCAudioDeviceModuleDelegate {
     var isSessionActive: Bool {
         lock.lock(); defer { lock.unlock() }
         return sessionActive
+    }
+
+    func withRecordingRecoveryPolicy<Result>(_ operation: () throws -> Result) throws -> Result {
+        lock.lock()
+        guard !isRecordingRecoveryPolicyRetained else {
+            lock.unlock()
+            throw LiveKitPlugin.RecordingRecoveryPolicyError.recoveryInProgress
+        }
+        guard isAutomaticManagementEnabled, sessionActive, lastIsRecordingEnabled,
+              cachedConfiguration?.category == AVAudioSession.Category.playAndRecord.rawValue else {
+            lock.unlock()
+            throw LiveKitPlugin.RecordingRecoveryPolicyError.recordingPolicyUnavailable
+        }
+        isRecordingRecoveryPolicyRetained = true
+        lock.unlock()
+        defer {
+            lock.lock()
+            isRecordingRecoveryPolicyRetained = false
+            lock.unlock()
+        }
+        // ADM calls synchronously re-enter this observer on WebRTC's worker.
+        // Never hold the lock across them or restore a captured policy on exit:
+        // route/policy updates made during recovery must remain authoritative.
+        return try operation()
     }
 
     func setAutomaticManagementEnabled(_ enabled: Bool, sessionActivationEnabled: Bool = true) {
@@ -974,7 +1038,8 @@ class LKAudioEngineObserver: NSObject, RTCAudioDeviceModuleDelegate {
     /// Swift SDK's `.playback` preset (playback + spokenAudio + mixWithOthers).
     private func effectiveConfigurationLocked(isRecordingEnabled: Bool) -> RTCAudioSessionConfiguration? {
         guard let configuration = cachedConfiguration else { return nil }
-        guard selectCategoryByEngineState, !isRecordingEnabled else { return configuration }
+        guard selectCategoryByEngineState, !isRecordingEnabled,
+              !isRecordingRecoveryPolicyRetained else { return configuration }
 
         let playback = copyConfiguration(configuration)
         playback.category = AVAudioSession.Category.playback.rawValue
